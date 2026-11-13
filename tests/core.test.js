@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseReceipt, categorize, findDate } from '../parser.js';
-import { generateInsights, summarize, within } from '../insights.js';
+import { generateInsights, summarize, within, budgetStatus, itemMemory, itemKey, dueItems, cheaperElsewhere } from '../insights.js';
 import { sampleReceipts } from '../sample.js';
 
 const TEXT = `FRESH MARKET
@@ -59,4 +59,30 @@ test('insights from sample data', () => {
   assert.match(titles, /paid more/);
   assert.match(titles, /running low/);
   assert.deepEqual(generateInsights([], now).map((i) => i.title), ['Keep adding receipts']);
+});
+
+test('budget status for the current month', () => {
+  const now = new Date(2026, 10, 13); // 13 Nov, 30-day month
+  const all = sampleReceipts(now);
+  const b = budgetStatus(all, 250, now);
+  assert.equal(Math.round(b.spent * 100), 11451);
+  assert.equal(b.daysLeft, 18);
+  assert.equal(Math.round(b.perDay * 100), 753);
+  assert.equal(b.state, 'fast');
+  assert.equal(budgetStatus(all, 100, now).state, 'over');
+  assert.equal(budgetStatus(all, 600, now).state, 'ok');
+  // Too early in the month to judge the pace.
+  assert.equal(budgetStatus([{ date: '2026-11-02', total: 90, items: [] }], 250, new Date(2026, 10, 2)).state, 'ok');
+  assert.match(generateInsights(all, now, 250)[0].title, /ahead of your budget/);
+  assert.match(generateInsights(all, now, 100)[0].title, /over budget/);
+});
+
+test('item memory, due items and cheaper shops', () => {
+  const now = new Date(2026, 10, 13);
+  const all = sampleReceipts(now);
+  const milk = itemMemory(all).find((m) => m.key === itemKey('MILK 2L'));
+  assert.deepEqual([milk.name, milk.price, milk.category, milk.count], ['Milk 2L', 4.19, 'Dairy & eggs', 4]);
+  assert.equal(itemMemory(all).some((m) => m.name === 'Large pizza'), false); // eating out is not remembered
+  assert.deepEqual(dueItems(all, now).map((d) => d.name), ['Milk 2L', 'Cola 6 pack']);
+  assert.deepEqual(cheaperElsewhere(all), [{ name: 'Bread', low: 2.99, lowStore: 'Fresh Market', high: 3.49, highStore: 'Corner Shop' }]);
 });

@@ -1,28 +1,14 @@
 :root {
-  color-scheme: light;
-  --bg: #f4f3ef;
-  --surface: #fcfcfb;
-  --text: #0b0b0b;
-  --text-2: #52514e;
-  --line: #dddcd6;
-  --brand: #1f6f5c;
-  --brand-ink: #ffffff;
-  --series-1: #2a78d6;
-  --danger: #b3261e;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    color-scheme: dark;
-    --bg: #111110;
-    --surface: #1a1a19;
-    --text: #f0efec;
-    --text-2: #c3c2b7;
-    --line: #34332f;
-    --brand: #3fa58c;
-    --brand-ink: #0b0b0b;
-    --series-1: #3987e5;
-    --danger: #f2877f;
-  }
+  color-scheme: dark;
+  --bg: #111110;
+  --surface: #1a1a19;
+  --text: #f0efec;
+  --text-2: #c3c2b7;
+  --line: #34332f;
+  --brand: #3fa58c;
+  --brand-ink: #0b0b0b;
+  --series-1: #3987e5;
+  --danger: #f2877f;
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -128,6 +114,34 @@ nav {
 }
 nav button {
   flex: 1; min-height: 56px; border: 0; background: none;
-  color: var(--text-2); font: inherit; font-size: .9rem; cursor: pointer;
+  color: var(--text-2); font: inherit; font-size: .82rem; padding: 0 2px; cursor: pointer;
 }
 nav button[aria-current=page] { color: var(--brand); font-weight: 700; box-shadow: inset 0 3px 0 var(--brand); }
+
+/* Month switcher and budget meter */
+.monthnav { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 0; }
+.monthnav h2 { margin: 0; }
+.monthnav button { width: 48px; min-height: 44px; margin: 0; font-size: 1.2rem; }
+.monthnav button:disabled { opacity: .35; cursor: default; }
+.meter { height: 12px; background: var(--line); border-radius: 6px; overflow: hidden; margin: 10px 0 8px; }
+.meter div { height: 100%; background: var(--brand); border-radius: 6px; }
+.meter.over div { background: var(--danger); }
+.big { font-size: 1.3rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.hint { margin: 4px 0 8px; color: var(--text-2); font-size: .9rem; }
+.hint.warn { color: var(--danger); }
+.inline { display: flex; gap: 8px; align-items: stretch; }
+.inline input { margin-top: 0; flex: 1; min-width: 0; }
+.inline .btn { width: auto; margin: 0; white-space: nowrap; }
+
+/* Shopping list */
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.chip {
+  min-height: 40px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 20px;
+  background: var(--bg); color: var(--text); font: inherit; font-size: .92rem; cursor: pointer;
+}
+.todo { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.todo:last-of-type { border-bottom: 0; }
+.todo label { flex: 1; margin: 0; display: flex; align-items: center; gap: 10px; font-weight: 400; min-width: 0; }
+.todo small { display: block; color: var(--text-2); }
+.todo.done span { text-decoration: line-through; color: var(--text-2); }
+.todo button { border: 0; background: none; color: var(--text-2); font-size: 1.4rem; min-width: 40px; min-height: 40px; cursor: pointer; }
