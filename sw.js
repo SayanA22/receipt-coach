@@ -1,7 +1,7 @@
 // Keeps the app and the photo reader on the phone so it opens and reads
 // receipts with no signal.
 const CACHE = 'receipt-coach-v1';
-const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'parser.js', 'insights.js', 'sample.js', 'manifest.webmanifest', 'icon.svg'];
+const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'parser.js', 'insights.js', 'sample.js', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png', 'apple-touch-icon.png'];
 const READER = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
 
 self.addEventListener('install', (e) => {
