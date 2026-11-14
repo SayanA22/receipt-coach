@@ -1,15 +1,16 @@
-import { CATEGORIES, parseReceipt, categorize, looksLikeEatingOut, toISODate } from './parser.js';
+import { CATEGORIES, parseReceipt, categorize, looksLikeEatingOut, toISODate, applyLearned, learnFrom } from './parser.js';
 import {
   summarize, generateInsights, WEEKDAYS, inMonth, toYM, budgetStatus,
-  itemMemory, dueItems, itemKey,
+  itemMemory, itemHistory, dueItems, itemKey, monthlyTotals, weekSummary, money, setCurrency,
 } from './insights.js';
 import { sampleReceipts } from './sample.js';
 
 const KEY = 'receipt-coach-v1';
 const LIST_KEY = 'receipt-coach-list-v1';
 const BUDGET_KEY = 'receipt-coach-budget-v1';
+const SETTINGS_KEY = 'receipt-coach-settings-v1';
+const RULES_KEY = 'receipt-coach-rules-v1';
 const $ = (id) => document.getElementById(id);
-const money = (n) => `$${n.toFixed(2)}`;
 const newId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
 // ---------- storage (stays on this device) ----------
@@ -22,8 +23,24 @@ function write(key, value) {
 let receipts = read(KEY, []);
 let list = read(LIST_KEY, []);      // shopping list: { id, name, done }
 let budget = Number(read(BUDGET_KEY, 0)) || 0; // monthly budget, 0 = not set
+// currency symbol, how 03/04 dates are read, and monthly limits per category
+let settings = { currency: '$', dayFirst: false, limits: {}, ...read(SETTINGS_KEY, {}) };
+// corrections made on the review screen, reused on later receipts
+let rules = read(RULES_KEY, { stores: {}, items: {} });
 const save = () => write(KEY, receipts);
 const saveList = () => write(LIST_KEY, list);
+const saveSettings = () => { write(SETTINGS_KEY, settings); setCurrency(settings.currency); };
+setCurrency(settings.currency);
+
+// A short message above the tab bar, optionally with one action such as Undo.
+let toastTimer = 0;
+function toast(text, action, run) {
+  clearTimeout(toastTimer);
+  const box = $('toast');
+  fill(box, el('span', {}, text), action ? el('button', { onclick: () => { box.hidden = true; run(); } }, action) : null);
+  box.hidden = false;
+  toastTimer = setTimeout(() => { box.hidden = true; }, 7000);
+}
 
 // ---------- tiny DOM helper ----------
 function el(tag, props = {}, ...kids) {
@@ -46,7 +63,7 @@ function show(view) {
   for (const b of document.querySelectorAll('nav button')) {
     if (b.dataset.view === view) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
   }
-  if (view === 'add') renderMonthLine();
+  if (view === 'add') renderSummary();
   if (view === 'dash') renderDash();
   if (view === 'insights') renderInsights();
   if (view === 'shop') renderShop();
@@ -57,14 +74,24 @@ document.querySelector('nav').addEventListener('click', (e) => {
   if (e.target.dataset.view) show(e.target.dataset.view);
 });
 
-// One line on the Add screen saying where the month stands.
-function renderMonthLine() {
+// The week at a glance on the Add screen: last 7 days, the month, one tip.
+function renderSummary() {
+  const box = $('summary');
+  box.hidden = !receipts.length;
+  if (box.hidden) return;
+  const w = weekSummary(receipts);
   const b = budgetStatus(receipts, budget);
   const month = new Date().toLocaleDateString('en', { month: 'long' });
-  $('month-line').textContent = !receipts.length ? ''
-    : budget > 0
+  const tip = generateInsights(receipts, new Date(), budget, settings.limits).find((i) => !/Keep adding|last week/.test(i.title));
+  fill(box,
+    el('h2', {}, 'This week'),
+    el('p', {}, `${money(w.thisWeek)} in the last 7 days`,
+      w.pct == null ? '.' : w.pct === 0 ? ', the same as the week before.' : `, ${w.pct > 0 ? 'up' : 'down'} ${Math.abs(w.pct)}% on the week before.`),
+    el('p', { class: 'muted' }, budget > 0
       ? `${month} so far: ${money(b.spent)} of ${money(budget)}${b.left >= 0 ? `, ${money(b.left)} left` : `, ${money(-b.left)} over`}.`
-      : `${month} so far: ${money(b.spent)}.`;
+      : `${month} so far: ${money(b.spent)}.`),
+    tip ? el('p', { class: 'muted' }, `Tip: ${tip.title}. `) : null,
+    tip ? el('button', { class: 'btn small', onclick: () => show('insights') }, 'See all tips') : null);
 }
 
 // ---------- add: read a photo ----------
@@ -81,6 +108,23 @@ async function shrink(file) {
   } catch { return file; }
 }
 
+// One reader is started and kept, so the second receipt reads faster than the first.
+let reader = null;
+let onProgress = () => {};
+function getReader() {
+  reader ||= (async () => {
+    const worker = await window.Tesseract.createWorker('eng', 1, {
+      logger: (m) => { if (m.status === 'recognizing text') onProgress(m.progress); },
+    });
+    // Treat the receipt as one block of lines. The default layout guess splits
+    // names and prices into separate columns and the prices get lost.
+    await worker.setParameters({ tessedit_pageseg_mode: '6' });
+    return worker;
+  })();
+  reader.catch(() => { reader = null; });
+  return reader;
+}
+
 $('photo').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   e.target.value = '';
@@ -92,10 +136,9 @@ $('photo').addEventListener('change', async (e) => {
   }
   try {
     status.textContent = 'Reading the receipt… 0%';
-    const { data } = await window.Tesseract.recognize(await shrink(file), 'eng', {
-      logger: (m) => { if (m.status === 'recognizing text') status.textContent = `Reading the receipt… ${Math.round(m.progress * 100)}%`; },
-    });
-    const parsed = parseReceipt(data.text);
+    onProgress = (p) => { status.textContent = `Reading the receipt… ${Math.round(p * 100)}%`; };
+    const { data } = await (await getReader()).recognize(await shrink(file));
+    const parsed = applyLearned(parseReceipt(data.text, new Date(), { dayFirst: settings.dayFirst }), rules);
     status.textContent = parsed.items.length
       ? `Found ${parsed.items.length} items. Check them below.`
       : 'Could not find any items. Try a flatter, brighter photo, or type them in below.';
@@ -109,6 +152,13 @@ $('photo').addEventListener('change', async (e) => {
 $('manual').addEventListener('click', () => {
   $('status').textContent = '';
   openReview({ store: '', date: toISODate(new Date()), eatingOut: false, items: [{ name: '', price: '', category: 'Other' }], total: '' });
+});
+
+// For markets, cash and online orders: a store and an amount, no items.
+$('quick').addEventListener('click', () => {
+  $('status').textContent = '';
+  openReview({ store: '', date: toISODate(new Date()), eatingOut: false, items: [], total: '' }, null, 'Quick add');
+  $('r-store').focus();
 });
 
 // ---------- add: review form (also used to edit a saved receipt) ----------
@@ -130,15 +180,17 @@ function itemRow(item) {
   price.addEventListener('input', syncTotal);
   const row = el('div', { class: 'item' }, name, price, cat,
     el('button', { type: 'button', 'aria-label': 'Remove item', onclick: () => { row.remove(); syncTotal(); } }, '×'));
+  row.dataset.read = item.read || ''; // what the photo reader produced, before any correction
   return row;
 }
 
-function readItems() {
+function readRows() {
   return [...$('r-items').children].map((row) => {
     const [name, price] = row.querySelectorAll('input');
-    return { name: name.value.trim(), price: Number(price.value), category: row.querySelector('select').value };
+    return { read: row.dataset.read, name: name.value.trim(), price: Number(price.value), category: row.querySelector('select').value };
   }).filter((i) => i.name && i.price > 0);
 }
+const readItems = () => readRows().map(({ name, price, category }) => ({ name, price, category }));
 
 function syncTotal() {
   const sum = readItems().reduce((a, i) => a + i.price, 0);
@@ -158,12 +210,13 @@ function syncTotal() {
       : `The items add up to ${money(sum)}. The other ${money(gap)} is probably tax.`;
 }
 
-function openReview(p, id = null) {
+function openReview(p, id = null, title = id ? 'Edit receipt' : 'Check the details') {
   editingId = id;
+  $('review').dataset.read = (!id && p.read) || '';
   memory = new Map(itemMemory(receipts).map((m) => [m.key, m]));
   fill($('stores'), [...new Set(receipts.map((r) => r.store).filter(Boolean))].map((s) => el('option', { value: s })));
   fill($('item-names'), [...memory.values()].slice(0, 200).map((m) => el('option', { value: m.name })));
-  $('r-title').textContent = id ? 'Edit receipt' : 'Check the details';
+  $('r-title').textContent = title;
   totalTouched = Boolean(p.total) && p.items.length > 0;
   $('r-store').value = p.store;
   $('r-date').value = p.date;
@@ -180,7 +233,7 @@ function closeReview(message) {
   editingId = null;
   $('review').hidden = true;
   $('status').textContent = message;
-  if (wasEditing) show('list'); else renderMonthLine();
+  if (wasEditing) show('list'); else renderSummary();
 }
 
 $('r-total').addEventListener('input', () => { totalTouched = true; syncTotal(); });
@@ -213,6 +266,11 @@ $('review').addEventListener('submit', (e) => {
   if (twin && !confirm(`You already saved a ${money(twin.total)} receipt from ${twin.store || 'this store'} on ${twin.date}. Save this one as well?`)) return;
   receipts = old ? receipts.map((r) => (r.id === old.id ? receipt : r)) : receipts.concat(receipt);
   save();
+  // Remember any names or categories that were corrected, for next time.
+  if (!old) {
+    rules = learnFrom(rules, $('review').dataset.read, receipt.store, eatingOut ? [] : readRows());
+    write(RULES_KEY, rules);
+  }
   // Anything just bought comes off the shopping list.
   const bought = new Set(receipt.items.map((i) => itemKey(i.name)));
   const ticked = old ? [] : list.filter((i) => !i.done && bought.has(itemKey(i.name)));
@@ -283,6 +341,32 @@ function budgetCard(spent, isCurrent) {
     el('button', { class: 'btn small', onclick: (e) => { form.hidden = false; e.target.hidden = true; form.querySelector('input').focus(); } }, 'Change budget'));
 }
 
+// Monthly limits for single categories, e.g. eating out.
+function limitsCard(byCategory) {
+  const spent = Object.fromEntries(byCategory);
+  const limited = CATEGORIES.filter((c) => settings.limits[c] > 0);
+  const inputs = CATEGORIES.map((c, n) => [c, el('input', { type: 'number', min: '0', step: '1', inputmode: 'decimal', placeholder: 'no limit', value: settings.limits[c] || '', id: `limit-${n}` })]);
+  const form = el('form', { hidden: true, onsubmit: (e) => {
+    e.preventDefault();
+    settings.limits = Object.fromEntries(inputs.map(([c, i]) => [c, Number(i.value) || 0]).filter(([, v]) => v > 0));
+    saveSettings();
+    renderDash();
+  } },
+    el('div', { class: 'fields' }, inputs.map(([c, i]) => [el('label', { for: i.id }, c), i])),
+    el('button', { class: 'btn primary' }, 'Save limits'));
+  return el('div', { class: 'card' },
+    el('h2', {}, 'Category limits'),
+    limited.length ? limited.map((c) => {
+      const used = spent[c] || 0, limit = settings.limits[c];
+      return el('div', { class: 'limit' },
+        el('div', {}, el('span', {}, c), el('span', {}, `${money(used)} of ${money(limit)}`)),
+        el('div', { class: `meter${used > limit ? ' over' : ''}`, role: 'img', 'aria-label': `${Math.round((used / limit) * 100)}% of the ${c} limit used` },
+          el('div', { style: `width:${Math.min((used / limit) * 100, 100)}%` })));
+    }) : el('p', { class: 'muted' }, 'Cap a single category for the month, for example eating out or snacks.'),
+    form,
+    el('button', { class: 'btn small', onclick: (e) => { form.hidden = false; e.target.hidden = true; } }, limited.length ? 'Change limits' : 'Set limits'));
+}
+
 function renderDash() {
   const view = $('view-dash');
   if (!receipts.length) { fill(view, emptyState('Add a few receipts and your spending will show up here.')); return; }
@@ -305,16 +389,21 @@ function renderDash() {
       el('div', { class: 'tile' }, el('b', {}, String(s.count)), el('span', {}, s.count === 1 ? 'receipt' : 'receipts'))),
     month.length ? [
       el('div', { class: 'card' }, el('h2', {}, 'What it went on'), bars(s.byCategory)),
+      limitsCard(s.byCategory),
       el('div', { class: 'card' }, el('h2', {}, 'Where you shopped'), bars(s.byStore.slice(0, 6))),
       el('div', { class: 'card' }, el('h2', {}, 'Day of the week'), bars(WEEKDAYS.map((d, i) => [d, s.byWeekday[i]]))),
-    ] : el('p', { class: 'muted' }, 'No receipts in this month.'));
+    ] : el('p', { class: 'muted' }, 'No receipts in this month.'),
+    el('div', { class: 'card' }, el('h2', {}, 'Month by month'),
+      // Months before the first receipt are left out.
+      bars(monthlyTotals(receipts, new Date(y, m - 1, 1)).filter((t, i, all) => all.slice(0, i + 1).some((x) => x.total > 0) || i === all.length - 1)
+        .map((t) => [t.label, t.total]))));
 }
 
 // ---------- insights ----------
 function renderInsights() {
   const view = $('view-insights');
   if (!receipts.length) { fill(view, emptyState('Suggestions appear once there are receipts to learn from.')); return; }
-  const tips = generateInsights(receipts, new Date(), budget);
+  const tips = generateInsights(receipts, new Date(), budget, settings.limits);
   fill(view,
     el('h2', {}, 'What your receipts say'),
     el('p', { class: 'muted' }, 'Based on the last 30 days.'),
@@ -400,7 +489,17 @@ function renderList() {
     const q = query.trim().toLowerCase();
     const found = [...receipts].sort((a, b) => b.date.localeCompare(a.date))
       .filter((r) => !q || r.store.toLowerCase().includes(q) || r.items.some((i) => i.name.toLowerCase().includes(q)));
+    // Searching an item also shows what it has cost, where and when.
+    const priced = q.length < 2 ? [] : Object.values(itemHistory(receipts))
+      .filter((h) => h[h.length - 1].name.toLowerCase().includes(q)).slice(0, 3);
     fill(results,
+      priced.map((h) => {
+        const low = h.reduce((a, x) => (x.price < a.price ? x : a));
+        return el('div', { class: 'card receipt prices' },
+          el('h2', {}, `${h[h.length - 1].name}: price history`),
+          el('p', { class: 'muted' }, `Lowest ${money(low.price)}${low.store ? ` at ${low.store}` : ''}. Bought ${h.length} time${h.length === 1 ? '' : 's'}.`),
+          el('table', {}, [...h].reverse().slice(0, 8).map((x) => el('tr', {}, el('td', {}, x.date), el('td', {}, x.store || ''), el('td', {}, money(x.price))))));
+      }),
       q ? el('p', { class: 'muted' }, `${found.length} matching receipt${found.length === 1 ? '' : 's'}.`) : null,
       found.map((r) => el('details', { class: 'card receipt', open: Boolean(q) },
         el('summary', {}, el('span', {}, r.store || 'Unknown store', el('small', {}, r.date + (r.eatingOut ? ' · eating out' : ''))), el('span', {}, money(r.total))),
@@ -408,11 +507,16 @@ function renderList() {
         el('div', { class: 'row' },
           el('button', { class: 'btn small', onclick: () => { show('add'); openReview(r, r.id); } }, 'Edit'),
           el('button', { class: 'btn small danger', onclick: () => {
-            if (!confirm('Delete this receipt?')) return;
             receipts = receipts.filter((x) => x.id !== r.id); save(); renderList();
+            toast('Receipt deleted.', 'Undo', () => { receipts = receipts.concat(r); save(); renderList(); });
           } }, 'Delete')))));
   };
   draw();
+  const currency = el('input', { id: 'set-currency', maxlength: 3, value: settings.currency,
+    onchange: (e) => { settings.currency = e.target.value.trim() || '$'; saveSettings(); renderList(); } });
+  const dates = el('select', { id: 'set-dates', onchange: (e) => { settings.dayFirst = e.target.value === 'd'; saveSettings(); } },
+    el('option', { value: 'm', selected: !settings.dayFirst }, 'month/day'),
+    el('option', { value: 'd', selected: settings.dayFirst }, 'day/month'));
   fill(view,
     el('h2', {}, `${receipts.length} receipt${receipts.length === 1 ? '' : 's'}`),
     receipts.length ? el('input', { type: 'search', placeholder: 'Search a store or an item', 'aria-label': 'Search receipts', value: query,
@@ -424,14 +528,44 @@ function renderList() {
       el('button', { class: 'btn', onclick: exportData }, 'Save backup file'),
       el('label', { class: 'btn', for: 'import' }, 'Load backup file'),
       el('input', { id: 'import', type: 'file', accept: 'application/json,.json', hidden: true, onchange: importData }),
-      receipts.some((r) => r.sample) ? el('button', { class: 'btn danger', onclick: () => { receipts = receipts.filter((r) => !r.sample); save(); renderList(); } }, 'Remove sample receipts') : null));
+      canShareFiles() ? el('button', { class: 'btn', onclick: shareData }, 'Send to another phone') : null,
+      receipts.length ? el('button', { class: 'btn', onclick: exportCsv }, 'Save as spreadsheet (CSV)') : null,
+      receipts.some((r) => r.sample) ? el('button', { class: 'btn danger', onclick: () => { receipts = receipts.filter((r) => !r.sample); save(); renderList(); } }, 'Remove sample receipts') : null),
+    el('div', { class: 'card' },
+      el('h2', {}, 'Settings'),
+      el('div', { class: 'fields' },
+        el('label', { for: 'set-currency' }, 'Currency symbol'), currency,
+        el('label', { for: 'set-dates' }, 'A receipt date like 03/04 means'), dates)));
 }
 
-function exportData() {
-  const data = { app: 'receipt-coach', version: 2, receipts, list, budget };
-  const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
-  el('a', { href: url, download: `receipts-${toISODate(new Date())}.json` }).click();
+const backupName = () => `receipts-${toISODate(new Date())}`;
+const backupJson = () => JSON.stringify({ app: 'receipt-coach', version: 3, receipts, list, budget, settings, rules }, null, 2);
+
+function download(text, type, name) {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  el('a', { href: url, download: name }).click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function exportData() { download(backupJson(), 'application/json', `${backupName()}.json`); }
+
+// Hands the backup to the phone's share sheet (messages, AirDrop, email).
+// The other phone opens it with "Load backup file", which only adds what is new.
+function shareFile() { return new File([backupJson()], `${backupName()}.json`, { type: 'application/json' }); }
+function canShareFiles() {
+  try { return Boolean(navigator.canShare && navigator.canShare({ files: [shareFile()] })); } catch { return false; }
+}
+async function shareData() {
+  try { await navigator.share({ files: [shareFile()], title: 'Receipt Coach backup' }); } catch { /* the share sheet was closed */ }
+}
+
+function exportCsv() {
+  const cell = (v) => `"${String(v).replace(/"/g, '""')}"`;
+  const rows = [['Date', 'Store', 'Item', 'Category', 'Price', 'Receipt total', 'Eating out']];
+  for (const r of [...receipts].sort((a, b) => a.date.localeCompare(b.date))) {
+    for (const i of r.items) rows.push([r.date, r.store, i.name, i.category, i.price.toFixed(2), r.total.toFixed(2), r.eatingOut ? 'yes' : 'no']);
+  }
+  download(rows.map((r) => r.map(cell).join(',')).join('\r\n'), 'text/csv', `${backupName()}.csv`);
 }
 
 async function importData(e) {
@@ -454,6 +588,24 @@ async function importData(e) {
     receipts = receipts.concat(fresh);
     save();
     if (!budget && Number(data.budget) > 0) { budget = Number(data.budget); write(BUDGET_KEY, budget); }
+    // Settings come across only onto a phone that has none of its own yet.
+    if (data.settings && typeof data.settings === 'object' && localStorage.getItem(SETTINGS_KEY) == null) {
+      const limits = {};
+      for (const c of CATEGORIES) if (Number(data.settings.limits?.[c]) > 0) limits[c] = Number(data.settings.limits[c]);
+      settings = { currency: String(data.settings.currency || '$').slice(0, 3), dayFirst: Boolean(data.settings.dayFirst), limits };
+      saveSettings();
+    }
+    // Corrections learned on the other phone are added; this phone's own win a clash.
+    if (data.rules && typeof data.rules === 'object') {
+      const text = (v) => typeof v === 'string' && v.trim();
+      const theirs = { stores: {}, items: {} };
+      for (const [k, v] of Object.entries(data.rules.stores || {})) if (text(v)) theirs.stores[k] = v.slice(0, 40);
+      for (const [k, v] of Object.entries(data.rules.items || {})) {
+        if (v && text(v.name) && CATEGORIES.includes(v.category)) theirs.items[k] = { name: v.name.slice(0, 60), category: v.category };
+      }
+      rules = { stores: { ...theirs.stores, ...rules.stores }, items: { ...theirs.items, ...rules.items } };
+      write(RULES_KEY, rules);
+    }
     if (Array.isArray(data.list)) {
       const names = new Set(list.map((i) => itemKey(i.name)));
       for (const i of data.list) {
@@ -470,4 +622,13 @@ async function importData(e) {
   }
 }
 
-renderMonthLine();
+renderSummary();
+
+// Keep the app and the reader on the phone, so both work with no signal.
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').then(() => navigator.serviceWorker.ready).then(() => {
+    // Start the reader once in the background: its files are saved for offline
+    // use and the first photo reads sooner.
+    if (window.Tesseract && navigator.onLine) setTimeout(() => getReader().catch(() => {}), 3000);
+  }).catch(() => {});
+}

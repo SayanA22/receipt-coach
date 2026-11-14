@@ -23,9 +23,10 @@
         <label class="btn primary" for="photo">Take or choose a photo</label>
         <input id="photo" type="file" accept="image/*" capture="environment" hidden>
         <button id="manual" class="btn">Type it in instead</button>
+        <button id="quick" class="btn">Just an amount, no receipt</button>
         <p id="status" class="muted" role="status"></p>
-        <p id="month-line" class="muted"></p>
       </div>
+      <div id="summary" class="card" hidden></div>
 
       <form id="review" class="card" hidden>
         <h2 id="r-title">Check the details</h2>
@@ -52,6 +53,8 @@
     <section id="view-shop" class="view" hidden></section>
     <section id="view-list" class="view" hidden></section>
   </main>
+
+  <div id="toast" role="status" hidden></div>
 
   <nav aria-label="Sections">
     <button data-view="add" aria-current="page">Add</button>

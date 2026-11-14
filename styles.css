@@ -133,6 +133,22 @@ nav button[aria-current=page] { color: var(--brand); font-weight: 700; box-shado
 .inline input { margin-top: 0; flex: 1; min-width: 0; }
 .inline .btn { width: auto; margin: 0; white-space: nowrap; }
 
+/* Message with an Undo button, just above the tab bar */
+#toast {
+  position: fixed; left: 12px; right: 12px; bottom: calc(68px + env(safe-area-inset-bottom));
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 14px; border-radius: 10px; background: var(--text); color: var(--bg); font-weight: 600;
+  max-width: 616px; margin: 0 auto;
+}
+#toast button { border: 0; background: none; color: inherit; font: inherit; font-weight: 700; text-decoration: underline; min-height: 40px; cursor: pointer; }
+.limit { margin: 10px 0; }
+.limit > div:first-child { display: flex; justify-content: space-between; gap: 8px; font-size: .92rem; }
+.limit .meter { margin: 4px 0 0; height: 8px; }
+.fields { display: grid; grid-template-columns: 1fr 110px; gap: 6px 10px; align-items: center; margin: 8px 0; }
+.fields label { margin: 0; font-weight: 400; }
+.fields input, .fields select { margin-top: 0; }
+.prices td:nth-child(2) { color: var(--text-2); }
+
 /* Shopping list */
 .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 .chip {

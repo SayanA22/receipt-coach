@@ -12,7 +12,9 @@ function daysAgo(iso, now) {
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   return Math.round((today - parseDate(iso)) / DAY);
 }
-function money(n) { return `$${n.toFixed(2)}`; }
+let symbol = '$';
+export function setCurrency(s) { symbol = s || '$'; }
+export function money(n) { return `${symbol}${n.toFixed(2)}`; }
 export function itemKey(name) { return name.toLowerCase().replace(/[^a-z ]/g, '').replace(/\s+/g, ' ').trim(); }
 
 export function within(receipts, days, now = new Date(), offset = 0) {
@@ -90,6 +92,24 @@ export function cheaperElsewhere(all) {
   return found.sort((a, b) => (b.high - b.low) - (a.high - a.low));
 }
 
+// Total spent in each of the last `count` calendar months, oldest first.
+export function monthlyTotals(receipts, now = new Date(), count = 6) {
+  const out = [];
+  for (let back = count - 1; back >= 0; back--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - back, 1);
+    const ym = toYM(d);
+    out.push({ ym, label: d.toLocaleDateString('en', { month: 'short' }), total: inMonth(receipts, ym).reduce((a, r) => a + r.total, 0) });
+  }
+  return out;
+}
+
+// The last 7 days against the 7 before; pct is null when there is nothing to compare with.
+export function weekSummary(receipts, now = new Date()) {
+  const thisWeek = summarize(within(receipts, 7, now)).total;
+  const lastWeek = summarize(within(receipts, 7, now, 7)).total;
+  return { thisWeek, lastWeek, pct: lastWeek > 0 ? Math.round(((thisWeek - lastWeek) / lastWeek) * 100) : null };
+}
+
 // Totals for the dashboard charts.
 export function summarize(receipts) {
   const byCategory = {}, byStore = {}, byWeekday = WEEKDAYS.map(() => 0);
@@ -104,8 +124,17 @@ export function summarize(receipts) {
   return { total, count: receipts.length, byCategory: sorted(byCategory), byStore: sorted(byStore), byWeekday };
 }
 
-export function generateInsights(all, now = new Date(), budget = 0) {
+export function generateInsights(all, now = new Date(), budget = 0, limits = {}) {
   const out = [];
+  const spentBy = Object.fromEntries(summarize(inMonth(all, toYM(now))).byCategory);
+  for (const [cat, limit] of Object.entries(limits)) {
+    if (limit > 0 && (spentBy[cat] || 0) > limit) {
+      out.push({
+        title: `${cat} is over its limit this month`,
+        detail: `${money(spentBy[cat])} spent against a limit of ${money(limit)}.`,
+      });
+    }
+  }
   if (budget > 0) {
     const b = budgetStatus(all, budget, now);
     if (b.state === 'over') {
@@ -149,7 +178,7 @@ export function generateInsights(all, now = new Date(), budget = 0) {
   if (small.length >= 4) {
     out.push({
       title: `${small.length} small shopping trips in the last 30 days`,
-      detail: `Trips under $20 added up to ${money(small.reduce((a, r) => a + r.total, 0))}. Folding them into one planned weekly shop usually cuts impulse buys and saves time.`,
+      detail: `Trips under ${symbol}20 added up to ${money(small.reduce((a, r) => a + r.total, 0))}. Folding them into one planned weekly shop usually cuts impulse buys and saves time.`,
     });
   }
 
