@@ -57,6 +57,18 @@ service cloud.firestore {
 }
 ```
 
+## Adding a payment from a link
+
+An automation can hand a payment to the app in the web address, for example the iPhone
+Shortcuts "Transaction" trigger that runs when a Wallet card is used:
+
+- `?store=Fresh%20Market&amount=%2412.34` opens Quick add with both filled in.
+- Add `&save=1` to save it straight away (with an Undo message).
+- `&date=2026-11-14` is optional; today is used otherwise.
+
+On an iPhone the link opens in Safari, which keeps separate data from a copy added to the
+Home Screen. Turn on family sharing in both to keep them in step.
+
 ## Run it
 
 Any static file server works:

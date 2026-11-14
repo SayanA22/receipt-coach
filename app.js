@@ -1,4 +1,4 @@
-import { CATEGORIES, parseReceipt, categorize, looksLikeEatingOut, toISODate, applyLearned, learnFrom } from './parser.js';
+import { CATEGORIES, parseReceipt, categorize, looksLikeEatingOut, toISODate, applyLearned, learnFrom, ruleKey } from './parser.js';
 import {
   summarize, generateInsights, WEEKDAYS, inMonth, toYM, budgetStatus,
   itemMemory, itemHistory, dueItems, itemKey, monthlyTotals, weekSummary, money, setCurrency,
@@ -297,7 +297,7 @@ function openReview(p, id = null, title = id ? 'Edit receipt' : 'Check the detai
   fill($('stores'), [...new Set(receipts.map((r) => r.store).filter(Boolean))].map((s) => el('option', { value: s })));
   fill($('item-names'), [...memory.values()].slice(0, 200).map((m) => el('option', { value: m.name })));
   $('r-title').textContent = title;
-  totalTouched = Boolean(p.total) && p.items.length > 0;
+  totalTouched = Boolean(p.total); // a total that was read or handed over is kept as it is
   $('r-store').value = p.store;
   $('r-date').value = p.date;
   $('r-out').checked = p.eatingOut;
@@ -890,6 +890,43 @@ if ('serviceWorker' in navigator) {
     if (window.Tesseract && navigator.onLine) setTimeout(() => getReader().catch(() => {}), 3000);
   }).catch(() => {});
 }
+
+// A payment handed over in the web address, for automations that run when a
+// card is used (the iPhone Shortcuts "Transaction" trigger, for example):
+//   ?store=Fresh%20Market&amount=%2412.34          opens Quick add, filled in
+//   ?store=Fresh%20Market&amount=%2412.34&save=1   saves it straight away
+function paymentFromLink() {
+  const q = new URLSearchParams(location.search);
+  if (!q.has('amount')) return;
+  history.replaceState(null, '', location.pathname); // so a reload does not add it twice
+  // "$1,234.50", "12,34 €" and "12.34" all mean a plain number.
+  const digits = String(q.get('amount')).replace(/[^\d.,]/g, '');
+  const cents = /[.,]\d{1,2}$/.test(digits);
+  const amount = Number(cents ? digits.replace(/[.,](?=.*[.,])/g, '').replace(',', '.') : digits.replace(/[.,]/g, ''));
+  if (!(amount > 0)) return;
+  const read = (q.get('store') || '').trim().slice(0, 40);
+  const store = rules.stores?.[ruleKey(read)] || read;
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(q.get('date') || '') ? q.get('date') : toISODate(new Date());
+  const eatingOut = looksLikeEatingOut(store);
+  if (q.get('save') !== '1' || !store) {
+    openReview({ store, read, date, eatingOut, items: [], total: amount }, null, 'Quick add');
+    return;
+  }
+  const receipt = {
+    id: newId(), updated: Date.now(), ...(family ? { by: family.name } : {}),
+    store, date, eatingOut, total: amount,
+    items: [{ name: 'Unlisted items', price: amount, category: eatingOut ? 'Eating out' : 'Other' }],
+  };
+  receipts = receipts.concat(receipt);
+  save();
+  renderSummary();
+  toast(`Added ${money(amount)} at ${store}.`, 'Undo', () => {
+    receipts = receipts.filter((r) => r.id !== receipt.id);
+    gone.receipts[receipt.id] = Date.now(); saveGone();
+    save(); renderSummary();
+  });
+}
+paymentFromLink();
 
 // Something was shared into the app from another app (Android: Share, then
 // Receipts). The service worker set it aside; pick it up and read it.
