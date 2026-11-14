@@ -21,9 +21,17 @@
     <section id="view-add" class="view">
       <div class="card">
         <h2>Add a receipt</h2>
-        <p class="muted">The photo is read on this phone. Nothing is uploaded.</p>
-        <label class="btn primary" for="photo">Take or choose a photo</label>
-        <input id="photo" type="file" accept="image/*" capture="environment" hidden>
+        <p class="muted">Paper or online. Receipts are read on this phone.</p>
+        <label class="btn primary" for="camera">Take a photo</label>
+        <input id="camera" type="file" accept="image/*" capture="environment" hidden>
+        <label class="btn" for="photo">Choose a photo, screenshot or PDF</label>
+        <input id="photo" type="file" accept="image/*,application/pdf,.pdf" hidden>
+        <button id="paste" class="btn">Paste an online receipt</button>
+        <form id="paste-box" hidden>
+          <label>Copy the text of the order email or web page, then paste it here
+            <textarea id="paste-text" rows="6" placeholder="Paste here"></textarea></label>
+          <button class="btn primary">Read it</button>
+        </form>
         <button id="manual" class="btn">Type it in instead</button>
         <button id="quick" class="btn">Just an amount, no receipt</button>
         <p id="status" class="muted" role="status"></p>

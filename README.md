@@ -7,7 +7,9 @@ where the money goes plus a few plain-language suggestions.
   [Tesseract.js](https://github.com/naptha/tesseract.js) and receipts are saved in the
   browser's local storage on that device.
 - **Screens:**
-  - **Add** – photo, typed, or just a store and an amount. Stores and items you have bought
+  - **Add** – a photo, a screenshot, a PDF, pasted text from an order email, typed, or just a
+    store and an amount. On Android, an installed copy also appears in the share sheet, so a
+    PDF, screenshot or selected text can be shared straight into it. Stores and items you have bought
     before are suggested, with the last price and category filled in, and the items are
     checked against the total. Names and categories you correct are remembered and applied
     to later receipts. A "This week" card sums up the last 7 days.

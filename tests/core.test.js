@@ -144,3 +144,34 @@ test('learns corrections and applies them next time', () => {
   assert.equal(next.store, 'Fresh Market');
   assert.deepEqual(next.items.map((i) => [i.name, i.price, i.category]), [['Milk 2L', 3.69, 'Dairy & eggs'], ['WIDGET', 2.1, 'Household']]);
 });
+
+test('online order text: price on its own line, written dates, shipping', () => {
+  const r = parseReceipt(`Order Confirmation
+Hello Sam, thanks for your order from Amazon.com
+Order placed: November 12, 2026
+Tide Pods Laundry Detergent, 42 Count
+Sold by: Amazon.com Services
+Qty: 1
+$13.97
+Organic Bananas, 2 lb
+Qty: 2
+$3.98
+Standing Desk
+$1,249.00
+Item Subtotal: $1,266.95
+Shipping & Handling: $5.99
+Total Before Tax: $1,272.94
+Estimated Tax: $104.50
+Order Total: $1,377.44`);
+  assert.equal(r.store, 'Amazon');
+  assert.equal(r.date, '2026-11-12');
+  assert.equal(r.total, 1377.44);
+  assert.deepEqual(r.items.map((i) => [i.name, i.price, i.category]), [
+    ['Tide Pods Laundry Detergent 42 Count', 13.97, 'Household'],
+    ['Organic Bananas 2 lb', 3.98, 'Produce'],
+    ['Standing Desk', 1249, 'Other'],
+  ]);
+  assert.equal(findDate('Delivered 3rd Dec 2026'), '2026-12-03');
+  assert.equal(findDate('Sept. 9, 2026'), '2026-09-09');
+  assert.equal(parseReceipt('Cafe Uno\nCappuccino 3,50 €\nTotal 3,50 €').total, 3.5);
+});

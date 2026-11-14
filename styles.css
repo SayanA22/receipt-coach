@@ -53,7 +53,7 @@ h3 { margin: 16px 0 8px; font-size: 1rem; }
 .row { display: flex; gap: 8px; }
 label { display: block; margin: 10px 0; font-weight: 600; }
 label.check { font-weight: 400; display: flex; gap: 8px; align-items: center; }
-input:not([type=checkbox]), select {
+input:not([type=checkbox]), select, textarea {
   display: block;
   width: 100%;
   min-height: 44px;
@@ -144,7 +144,7 @@ nav button[aria-current=page] { color: var(--brand); font-weight: 700; box-shado
 .limit { margin: 10px 0; }
 .limit > div:first-child { display: flex; justify-content: space-between; gap: 8px; font-size: .92rem; }
 .limit .meter { margin: 4px 0 0; height: 8px; }
-.fields { display: grid; grid-template-columns: 1fr 110px; gap: 6px 10px; align-items: center; margin: 8px 0; }
+.fields { display: grid; grid-template-columns: 1fr 132px; gap: 6px 10px; align-items: center; margin: 8px 0; }
 .fields label { margin: 0; font-weight: 400; }
 .fields input, .fields select { margin-top: 0; }
 .prices td:nth-child(2) { color: var(--text-2); }

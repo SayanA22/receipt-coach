@@ -21,10 +21,10 @@ const KEYWORDS = {
 const EATING_OUT_STORES = ['restaurant', 'cafe', 'coffee', 'pizza', 'burger', 'grill', 'sushi', 'taco', 'diner', 'kitchen', 'bistro', 'bar ', 'pub', 'bakery', 'mcdonald', 'starbucks', 'subway', 'kfc', 'chipotle', 'domino', 'wendy', 'dunkin', 'takeaway', 'takeout'];
 
 // Lines that end in a price but are not something that was bought.
-const NOT_AN_ITEM = /\b(sub\s*-?\s*total|total|tax|vat|gst|hst|pst|cash|change|visa|master\s*card|amex|debit|credit|balance|tender|card|rounding|amount|payment|tip|gratuity|loyalty|points|items? sold)\b/i;
+const NOT_AN_ITEM = /\b(sub\s*-?\s*total|total|tax|vat|gst|hst|pst|cash|change|visa|master\s*card|amex|debit|credit|balance|tender|card|rounding|amount|payment|tip|gratuity|loyalty|points|items? sold|shipping|delivery|handling|postage|fees?|refund)\b/i;
 // Money taken off the item on the line above.
 const DISCOUNT = /\b(discount|coupon|savings?|saved|promo|member|markdown|reduced|off)\b/i;
-const PRICE_AT_END = /(-?)\s*[$€£₹]?\s*(\d{1,4})\s*[.,]\s*(\d{2})\s*(-?)\s*[A-Za-z]{0,2}\s*$/;
+const PRICE_AT_END = /(-?)\s*[$€£₹]?\s*(\d{1,3}(?:,\d{3})+|\d{1,4})\s*[.,]\s*(\d{2})\s*(-?)\s*[$€£₹]?\s*[A-Za-z]{0,2}\s*$/;
 // The same, allowing letters the reader often mistakes for digits (O for 0, l for 1, S for 5, B for 8).
 const PRICE_MISREAD = /(?<![A-Za-z])(-?)\s*[$€£₹]?\s*([\dOoIlSB]{1,4})\s*[.,]\s*([\dOoIlSB]{2})\s*(-?)(?:\s+[A-Za-z]{1,2})?\s*$/;
 const AS_DIGIT = { O: '0', o: '0', I: '1', l: '1', S: '5', B: '8' };
@@ -38,7 +38,7 @@ function priceAtEnd(line) {
     if (!m || ((m[2] + m[3]).match(/\d/g) || []).length < 2 || ((m[2] + m[3]).match(/\D/g) || []).length > 1) return null;
   }
   const digits = (t) => t.replace(/[OoIlSB]/g, (c) => AS_DIGIT[c]);
-  return { value: Number(`${digits(m[2])}.${digits(m[3])}`), negative: Boolean(m[1] || m[4]), label: line.slice(0, m.index) };
+  return { value: Number(`${digits(m[2].replace(/,/g, ''))}.${digits(m[3])}`), negative: Boolean(m[1] || m[4]), label: line.slice(0, m.index) };
 }
 
 // What is left of a label once quantities and weights are taken out,
@@ -50,6 +50,10 @@ function withoutQuantity(label) {
     .replace(/\b(qty|net|tare|wt|at|for)\b/gi, ' ')
     .replace(/\/\s*(kg|lbs?|g|oz|ea|each)\b/gi, ' ');
 }
+const DETAIL_LINE = /^\s*(sold by|ships? from|shipped by|seller|quantity|condition|size|colou?r|style|sku|asin|item (no|number|#)|model|return|arriving|arrives|delivered|estimated delivery|gift)\b/i;
+// Online shops whose name is rarely the first line of their emails.
+const MERCHANTS = ['Amazon', 'Walmart', 'Instacart', 'Uber Eats', 'DoorDash', 'Grubhub', 'Deliveroo', 'Just Eat', 'Target', 'Costco', 'eBay', 'Etsy', 'IKEA', 'Tesco', 'Sainsbury', 'Ocado', 'Asda', 'Kroger', 'Safeway', 'Whole Foods', 'Aldi', 'Lidl', 'Best Buy', 'Apple', 'Shein', 'Temu', 'Zomato', 'Swiggy', 'Blinkit', 'Flipkart', 'HelloFresh'];
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 const letters = (t) => (t.match(/[A-Za-z]/g) || []).length;
 
 export function categorize(name) {
@@ -86,6 +90,12 @@ export function findDate(text, dayFirst = false) {
     const monthFirst = dayFirst ? a <= 12 && b > 12 : !(a > 12);
     return monthFirst ? valid(y, a, b) : valid(y, b, a);
   }
+  // Written-out dates, as in order emails: "November 12, 2026" or "12 Nov 2026".
+  const name = '(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\.?';
+  m = text.match(new RegExp(`\\b${name}\\s+(\\d{1,2})(?:st|nd|rd|th)?,?\\s+(20\\d{2})\\b`, 'i'));
+  if (m) return valid(+m[3], MONTHS.indexOf(m[1].toLowerCase()) + 1, +m[2]);
+  m = text.match(new RegExp(`\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+${name},?\\s+(20\\d{2})\\b`, 'i'));
+  if (m) return valid(+m[3], MONTHS.indexOf(m[2].toLowerCase()) + 1, +m[1]);
   return null;
 }
 
@@ -105,7 +115,8 @@ function cleanName(raw) {
 
 export function parseReceipt(text, today = new Date(), { dayFirst = false } = {}) {
   const lines = String(text).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  const store = (lines.find((l) => letters(l) >= 3 && !priceAtEnd(l)) || '').slice(0, 40);
+  const merchant = MERCHANTS.find((name) => new RegExp(`\\b${name}\\b`, 'i').test(text));
+  const store = merchant || (lines.find((l) => letters(l) >= 3 && !priceAtEnd(l)) || '').slice(0, 40);
   const items = [];
   let total = null;
   let above = null; // a name-only line waiting for its price on the next line
@@ -113,7 +124,9 @@ export function parseReceipt(text, today = new Date(), { dayFirst = false } = {}
   for (const line of lines) {
     const p = priceAtEnd(line);
     if (!p) {
-      above = letters(withoutQuantity(line)) >= 3 && !NOT_AN_ITEM.test(line) ? line : null;
+      // A bare quantity ("Qty: 1") or a detail line ("Sold by ...") sits between a
+      // name and its price in online orders: the name above keeps waiting.
+      if (letters(withoutQuantity(line)) >= 3 && !DETAIL_LINE.test(line)) above = NOT_AN_ITEM.test(line) ? null : line;
       continue;
     }
     const nameAbove = above;

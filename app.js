@@ -144,28 +144,89 @@ function getReader() {
   return reader;
 }
 
-$('photo').addEventListener('change', async (e) => {
-  const file = e.target.files[0];
-  e.target.value = '';
-  if (!file) return;
+// Shows what was found in a receipt's text, ready to be checked.
+function openFromText(text, nothingFound) {
+  const parsed = applyLearned(parseReceipt(text, new Date(), { dayFirst: settings.dayFirst }), rules);
+  $('status').textContent = parsed.items.length
+    ? `Found ${parsed.items.length} item${parsed.items.length === 1 ? '' : 's'}. Check them below.`
+    : nothingFound;
+  openReview(parsed);
+}
+
+async function readImage(image) {
+  if (!window.Tesseract) throw new Error('no reader');
   const status = $('status');
-  if (!window.Tesseract) {
-    status.textContent = 'The photo reader could not load (it needs internet the first time). You can type the receipt in instead.';
-    return;
+  status.textContent = 'Reading the receipt… 0%';
+  onProgress = (p) => { status.textContent = `Reading the receipt… ${Math.round(p * 100)}%`; };
+  const { data } = await (await getReader()).recognize(image);
+  return data.text;
+}
+
+// PDF receipts from online shops. The text is taken straight from the file;
+// a PDF that is only a scan is turned into a picture and read like a photo.
+const PDFJS = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/';
+async function readPdf(file) {
+  $('status').textContent = 'Opening the PDF…';
+  const pdfjs = await import(`${PDFJS}pdf.min.mjs`);
+  pdfjs.GlobalWorkerOptions.workerSrc = `${PDFJS}pdf.worker.min.mjs`;
+  const doc = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
+  const lines = [];
+  for (let n = 1; n <= Math.min(doc.numPages, 6); n++) {
+    const words = (await (await doc.getPage(n)).getTextContent()).items
+      .filter((w) => w.str.trim())
+      .map((w) => ({ text: w.str, x: w.transform[4], y: w.transform[5] }))
+      .sort((p, q) => q.y - p.y);
+    // Words at nearly the same height are one line, read left to right.
+    let row = [];
+    const flush = () => { if (row.length) lines.push(row.sort((p, q) => p.x - q.x).map((w) => w.text).join(' ')); row = []; };
+    for (const w of words) { if (row.length && Math.abs(row[0].y - w.y) > 4) flush(); row.push(w); }
+    flush();
   }
+  const text = lines.join('\n');
+  if (/\d[.,]\d{2}/.test(text)) return text;
+  const page = await doc.getPage(1);
+  const viewport = page.getViewport({ scale: 2.5 });
+  const canvas = el('canvas', { width: Math.ceil(viewport.width), height: Math.ceil(viewport.height) });
+  await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+  return readImage(canvas);
+}
+
+// A photo, a screenshot or a PDF, from the camera, the file picker or another app.
+async function readFile(file) {
+  const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name);
   try {
-    status.textContent = 'Reading the receipt… 0%';
-    onProgress = (p) => { status.textContent = `Reading the receipt… ${Math.round(p * 100)}%`; };
-    const { data } = await (await getReader()).recognize(await shrink(file));
-    const parsed = applyLearned(parseReceipt(data.text, new Date(), { dayFirst: settings.dayFirst }), rules);
-    status.textContent = parsed.items.length
-      ? `Found ${parsed.items.length} items. Check them below.`
-      : 'Could not find any items. Try a flatter, brighter photo, or type them in below.';
-    openReview(parsed);
+    const text = isPdf ? await readPdf(file) : await readImage(await shrink(file));
+    openFromText(text, isPdf
+      ? 'Could not find any items in that PDF. Type them in below.'
+      : 'Could not find any items. Try a flatter, brighter photo, or type them in below.');
   } catch (err) {
     console.error(err);
-    status.textContent = 'Sorry, that photo could not be read. Try again or type it in.';
+    $('status').textContent = !isPdf && !window.Tesseract
+      ? 'The photo reader could not load (it needs internet the first time). You can type the receipt in instead.'
+      : `Sorry, that ${isPdf ? 'PDF' : 'photo'} could not be read. Try again or type it in.`;
   }
+}
+
+for (const id of ['camera', 'photo']) {
+  $(id).addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (file) readFile(file);
+  });
+}
+
+// Online receipts: paste the text of the order email or web page.
+$('paste').addEventListener('click', () => {
+  $('paste-box').hidden = !$('paste-box').hidden;
+  if (!$('paste-box').hidden) $('paste-text').focus();
+});
+$('paste-box').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const text = $('paste-text').value;
+  if (!text.trim()) { $('status').textContent = 'Paste the text of the receipt first.'; return; }
+  $('paste-text').value = '';
+  $('paste-box').hidden = true;
+  openFromText(text, 'Could not find any items in that text. Check the store and total, or add the items below.');
 });
 
 $('manual').addEventListener('click', () => {
@@ -828,4 +889,22 @@ if ('serviceWorker' in navigator) {
     // use and the first photo reads sooner.
     if (window.Tesseract && navigator.onLine) setTimeout(() => getReader().catch(() => {}), 3000);
   }).catch(() => {});
+}
+
+// Something was shared into the app from another app (Android: Share, then
+// Receipts). The service worker set it aside; pick it up and read it.
+if (new URLSearchParams(location.search).has('shared') && 'caches' in window) {
+  history.replaceState(null, '', location.pathname);
+  (async () => {
+    const cache = await caches.open('receipt-coach-shared');
+    const [file, text] = await Promise.all([cache.match('shared-file'), cache.match('shared-text')]);
+    await Promise.all([cache.delete('shared-file'), cache.delete('shared-text')]);
+    if (file) {
+      const blob = await file.blob();
+      readFile(new File([blob], decodeURIComponent(file.headers.get('X-Name') || 'shared'), { type: blob.type }));
+    } else if (text) {
+      const words = await text.text();
+      if (words.trim()) openFromText(words, 'Could not find any items in what was shared. Check the store and total, or add the items below.');
+    }
+  })().catch(() => {});
 }
