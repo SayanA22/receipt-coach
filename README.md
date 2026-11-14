@@ -25,6 +25,36 @@ where the money goes plus a few plain-language suggestions.
 - **Works offline.** A service worker (`sw.js`) keeps the app and the photo reader on the
   phone after the first visit.
 
+## Family sharing (optional)
+
+Off by default. When switched on, every phone that enters the same family code shows the
+same receipts, shopping list, budget and settings, and each receipt records who added it.
+
+- One document per family is kept in a Cloud Firestore database. It is compressed and
+  encrypted on the phone with a key derived from the family code, so the database only
+  holds unreadable text. The code itself never leaves the phones.
+- Phones check for changes when the app opens, every 20 seconds while it is on screen, and
+  right after a change. The latest change to a receipt or list entry wins; deletions carry
+  across.
+
+To switch it on: create a Firebase project, create a Firestore database in production mode,
+put the project ID in `config.js`, and publish these security rules:
+
+```
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /families/{family} {
+      allow get: if true;
+      allow create, update: if family.matches('^[0-9a-f]{64}$')
+        && request.resource.data.keys().hasOnly(['data'])
+        && request.resource.data.data is string
+        && request.resource.data.data.size() < 1000000;
+    }
+  }
+}
+```
+
 ## Run it
 
 Any static file server works:
@@ -51,10 +81,15 @@ npm test
 | `app.js` | Screens, photo reading, shopping list, storage, backup |
 | `sample.js` | Made-up receipts for trying the app |
 | `sw.js` | Saves the app and the photo reader for offline use |
+| `sync.js` | Family sharing: family codes, encryption, merging, the Firestore calls |
+| `config.js` | The Firebase project ID that switches family sharing on |
 
 ## Known limits
 
 - Photo reading works best on flat, well-lit, printed receipts; always check the review screen.
   It has been tested on drawn receipts, not yet on a set of real photos.
-- Data lives on one device. Use the backup file (or "Send to another phone") to move or merge it.
+- Without family sharing, data lives on one device. Use the backup file (or "Send to another
+  phone") to move or merge it.
+- Family sharing keeps a household's data in one document of at most 1 MB, which is several
+  thousand receipts. Anyone with the family code can read and change everything.
 - One currency symbol at a time; no conversion.

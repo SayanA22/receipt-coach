@@ -1,7 +1,7 @@
 // Keeps the app and the photo reader on the phone so it opens and reads
 // receipts with no signal.
-const CACHE = 'receipt-coach-v1';
-const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'parser.js', 'insights.js', 'sample.js', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png', 'apple-touch-icon.png'];
+const CACHE = 'receipt-coach-v2';
+const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'parser.js', 'insights.js', 'sample.js', 'sync.js', 'config.js', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png', 'apple-touch-icon.png'];
 const READER = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
 
 self.addEventListener('install', (e) => {
@@ -23,7 +23,10 @@ self.addEventListener('activate', (e) => {
 self.addEventListener('fetch', (e) => {
   const { request } = e;
   if (request.method !== 'GET' || !request.url.startsWith('http')) return;
-  const own = new URL(request.url).origin === self.location.origin;
+  const { origin, hostname } = new URL(request.url);
+  const own = origin === self.location.origin;
+  // Only the app and the reader are kept. Family sharing always goes to the network.
+  if (!own && hostname !== 'cdn.jsdelivr.net') return;
   e.respondWith((async () => {
     const cache = await caches.open(CACHE);
     const keep = (res) => { if (res.ok || res.type === 'opaque') cache.put(request, res.clone()); return res; };

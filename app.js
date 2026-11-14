@@ -4,12 +4,18 @@ import {
   itemMemory, itemHistory, dueItems, itemKey, monthlyTotals, weekSummary, money, setCurrency,
 } from './insights.js';
 import { sampleReceipts } from './sample.js';
+import { makeCode, tidyCode, familyFromCode, firestoreStore, syncOnce } from './sync.js';
+import { FAMILY } from './config.js';
 
 const KEY = 'receipt-coach-v1';
 const LIST_KEY = 'receipt-coach-list-v1';
 const BUDGET_KEY = 'receipt-coach-budget-v1';
 const SETTINGS_KEY = 'receipt-coach-settings-v1';
 const RULES_KEY = 'receipt-coach-rules-v1';
+const GONE_KEY = 'receipt-coach-gone-v1';     // what was deleted and when, so deletions reach other phones
+const STAMPS_KEY = 'receipt-coach-stamps-v1'; // when budget, settings and corrections last changed
+const FAMILY_KEY = 'receipt-coach-family-v1'; // this phone's family code and the name of whoever uses it
+const SHARED_KEYS = [KEY, LIST_KEY, BUDGET_KEY, SETTINGS_KEY, RULES_KEY];
 const $ = (id) => document.getElementById(id);
 const newId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -17,8 +23,14 @@ const newId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 function read(key, fallback) {
   try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; }
 }
+let applying = false; // true while data from another phone is being stored
 function write(key, value) {
   try { localStorage.setItem(key, JSON.stringify(value)); } catch { alert('Could not save on this device. Storage may be full or blocked.'); }
+  if (applying || !SHARED_KEYS.includes(key)) return;
+  // Note when the single-value things changed, then pass the change on to the family.
+  const which = { [BUDGET_KEY]: 'budget', [SETTINGS_KEY]: 'settings', [RULES_KEY]: 'rules' }[key];
+  if (which) { stamps[which] = Date.now(); localStorage.setItem(STAMPS_KEY, JSON.stringify(stamps)); }
+  syncSoon();
 }
 let receipts = read(KEY, []);
 let list = read(LIST_KEY, []);      // shopping list: { id, name, done }
@@ -27,6 +39,11 @@ let budget = Number(read(BUDGET_KEY, 0)) || 0; // monthly budget, 0 = not set
 let settings = { currency: '$', dayFirst: false, limits: {}, ...read(SETTINGS_KEY, {}) };
 // corrections made on the review screen, reused on later receipts
 let rules = read(RULES_KEY, { stores: {}, items: {} });
+let gone = { receipts: {}, list: {}, ...read(GONE_KEY, {}) };
+let stamps = read(STAMPS_KEY, {});
+let family = read(FAMILY_KEY, null); // { code, name, last } once this phone has joined a family
+const saveGone = () => write(GONE_KEY, gone);
+const listKey = (name) => itemKey(name) || name.trim().toLowerCase();
 const save = () => write(KEY, receipts);
 const saveList = () => write(LIST_KEY, list);
 const saveSettings = () => { write(SETTINGS_KEY, settings); setCurrency(settings.currency); };
@@ -58,7 +75,9 @@ function fill(node, ...kids) {
 }
 
 // ---------- navigation ----------
-function show(view) {
+let currentView = 'add';
+function show(view, toTop = true) {
+  currentView = view;
   for (const v of document.querySelectorAll('.view')) v.hidden = v.id !== `view-${view}`;
   for (const b of document.querySelectorAll('nav button')) {
     if (b.dataset.view === view) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
@@ -68,7 +87,7 @@ function show(view) {
   if (view === 'insights') renderInsights();
   if (view === 'shop') renderShop();
   if (view === 'list') renderList();
-  window.scrollTo(0, 0);
+  if (toTop) window.scrollTo(0, 0);
 }
 document.querySelector('nav').addEventListener('click', (e) => {
   if (e.target.dataset.view) show(e.target.dataset.view);
@@ -255,6 +274,8 @@ $('review').addEventListener('submit', (e) => {
   const receipt = {
     ...(old && old.sample ? { sample: true } : {}),
     id: old ? old.id : newId(),
+    updated: Date.now(),
+    ...(old ? (old.by ? { by: old.by } : {}) : (family ? { by: family.name } : {})),
     store: $('r-store').value.trim(),
     date: $('r-date').value,
     eatingOut,
@@ -274,7 +295,7 @@ $('review').addEventListener('submit', (e) => {
   // Anything just bought comes off the shopping list.
   const bought = new Set(receipt.items.map((i) => itemKey(i.name)));
   const ticked = old ? [] : list.filter((i) => !i.done && bought.has(itemKey(i.name)));
-  if (ticked.length) { ticked.forEach((i) => { i.done = true; }); saveList(); }
+  if (ticked.length) { ticked.forEach((i) => { i.done = true; i.updated = Date.now(); }); saveList(); }
   closeReview(old ? '' : `Saved.${ticked.length ? ` Ticked ${ticked.length} item${ticked.length === 1 ? '' : 's'} off your shopping list.` : ''} Add another, or look at your dashboard.`);
 });
 
@@ -391,6 +412,11 @@ function renderDash() {
       el('div', { class: 'card' }, el('h2', {}, 'What it went on'), bars(s.byCategory)),
       limitsCard(s.byCategory),
       el('div', { class: 'card' }, el('h2', {}, 'Where you shopped'), bars(s.byStore.slice(0, 6))),
+      month.some((r) => r.by) ? el('div', { class: 'card' }, el('h2', {}, 'Who paid'), bars(Object.entries(month.reduce((who, r) => {
+        const name = r.by || 'Not recorded';
+        who[name] = (who[name] || 0) + r.total;
+        return who;
+      }, {})).sort((a, b) => b[1] - a[1]))) : null,
       el('div', { class: 'card' }, el('h2', {}, 'Day of the week'), bars(WEEKDAYS.map((d, i) => [d, s.byWeekday[i]]))),
     ] : el('p', { class: 'muted' }, 'No receipts in this month.'),
     el('div', { class: 'card' }, el('h2', {}, 'Month by month'),
@@ -419,7 +445,8 @@ function addToList(name) {
   const clean = name.trim().slice(0, 60);
   if (!clean) return;
   const same = list.find((i) => itemKey(i.name) === itemKey(clean));
-  if (same) same.done = false; else list.push({ id: newId(), name: clean, done: false });
+  if (same) { same.done = false; same.updated = Date.now(); } else list.push({ id: newId(), name: clean, done: false, updated: Date.now() });
+  delete gone.list[listKey(clean)]; saveGone();
   saveList();
   renderShop();
 }
@@ -449,9 +476,9 @@ function renderShop() {
     const last = mem.get(itemKey(i.name));
     return el('div', { class: `todo${i.done ? ' done' : ''}` },
       el('label', {},
-        el('input', { type: 'checkbox', checked: i.done, onchange: (e) => { i.done = e.target.checked; saveList(); renderShop(); } }),
+        el('input', { type: 'checkbox', checked: i.done, onchange: (e) => { i.done = e.target.checked; i.updated = Date.now(); saveList(); renderShop(); } }),
         el('span', {}, i.name, last && !i.done ? el('small', {}, `last time ${money(last.price)}${last.store ? ` at ${last.store}` : ''}`) : null)),
-      el('button', { 'aria-label': `Remove ${i.name}`, onclick: () => { list = list.filter((x) => x.id !== i.id); saveList(); renderShop(); } }, '×'));
+      el('button', { 'aria-label': `Remove ${i.name}`, onclick: () => { dropFromList([i]); renderShop(); } }, '×'));
   };
   const chips = (items) => el('div', { class: 'chips' }, items.map((x) => el('button', { class: 'chip', onclick: () => addToList(x.name) }, `+ ${x.name}`)));
 
@@ -476,7 +503,16 @@ function renderShop() {
     done.length ? el('div', { class: 'card' },
       el('h2', {}, 'In the basket'),
       done.map(row),
-      el('button', { class: 'btn small', onclick: () => { list = list.filter((i) => !i.done); saveList(); renderShop(); } }, 'Clear ticked items')) : null);
+      el('button', { class: 'btn small', onclick: () => { dropFromList(done); renderShop(); } }, 'Clear ticked items')) : null);
+}
+
+// Takes entries off the list and notes it, so they come off the family's other phones too.
+function dropFromList(entries) {
+  const ids = new Set(entries.map((i) => i.id));
+  for (const i of entries) gone.list[listKey(i.name)] = Date.now();
+  list = list.filter((i) => !ids.has(i.id));
+  saveGone();
+  saveList();
 }
 
 // ---------- receipts list and backup ----------
@@ -502,13 +538,18 @@ function renderList() {
       }),
       q ? el('p', { class: 'muted' }, `${found.length} matching receipt${found.length === 1 ? '' : 's'}.`) : null,
       found.map((r) => el('details', { class: 'card receipt', open: Boolean(q) },
-        el('summary', {}, el('span', {}, r.store || 'Unknown store', el('small', {}, r.date + (r.eatingOut ? ' · eating out' : ''))), el('span', {}, money(r.total))),
+        el('summary', {}, el('span', {}, r.store || 'Unknown store', el('small', {}, r.date + (r.eatingOut ? ' · eating out' : '') + (r.by ? ` · ${r.by}` : ''))), el('span', {}, money(r.total))),
         el('table', {}, r.items.map((i) => el('tr', {}, el('td', {}, i.name, ' ', el('small', {}, i.category)), el('td', {}, money(i.price))))),
         el('div', { class: 'row' },
           el('button', { class: 'btn small', onclick: () => { show('add'); openReview(r, r.id); } }, 'Edit'),
           el('button', { class: 'btn small danger', onclick: () => {
-            receipts = receipts.filter((x) => x.id !== r.id); save(); renderList();
-            toast('Receipt deleted.', 'Undo', () => { receipts = receipts.concat(r); save(); renderList(); });
+            receipts = receipts.filter((x) => x.id !== r.id);
+            if (!r.sample) { gone.receipts[r.id] = Date.now(); saveGone(); }
+            save(); renderList();
+            toast('Receipt deleted.', 'Undo', () => {
+              delete gone.receipts[r.id]; saveGone();
+              receipts = receipts.concat({ ...r, updated: Date.now() }); save(); renderList();
+            });
           } }, 'Delete')))));
   };
   draw();
@@ -522,6 +563,7 @@ function renderList() {
     receipts.length ? el('input', { type: 'search', placeholder: 'Search a store or an item', 'aria-label': 'Search receipts', value: query,
       oninput: (e) => { query = e.target.value; draw(); } }) : null,
     results,
+    familyCard(),
     el('div', { class: 'card' },
       el('h2', {}, 'Backup'),
       el('p', { class: 'muted' }, 'Everything is stored only on this device. Save a backup file to keep it safe or move it to another phone.'),
@@ -568,6 +610,158 @@ function exportCsv() {
   download(rows.map((r) => r.map(cell).join(',')).join('\r\n'), 'text/csv', `${backupName()}.csv`);
 }
 
+// A receipt from outside this phone (a backup file or another family phone),
+// checked and reduced to the fields the app uses. Null if it is not a receipt.
+function cleanReceipt(r) {
+  if (!r || typeof r.date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(r.date) || !Array.isArray(r.items) || typeof r.total !== 'number') return null;
+  return {
+    ...(r.sample ? { sample: true } : {}),
+    ...(typeof r.by === 'string' && r.by.trim() ? { by: r.by.trim().slice(0, 20) } : {}),
+    ...(Number(r.updated) > 0 ? { updated: Number(r.updated) } : {}),
+    id: String(r.id || newId()),
+    store: String(r.store || '').slice(0, 40), date: r.date, eatingOut: Boolean(r.eatingOut), total: r.total,
+    items: r.items.filter((i) => i && typeof i.price === 'number').map((i) => ({ name: String(i.name || '').slice(0, 60), price: i.price, category: CATEGORIES.includes(i.category) ? i.category : 'Other' })),
+  };
+}
+
+function cleanSettings(s) {
+  const limits = {};
+  for (const c of CATEGORIES) if (Number(s?.limits?.[c]) > 0) limits[c] = Number(s.limits[c]);
+  return { currency: String(s?.currency || '$').slice(0, 3), dayFirst: Boolean(s?.dayFirst), limits };
+}
+
+function cleanRules(r) {
+  const text = (v) => typeof v === 'string' && v.trim();
+  const out = { stores: {}, items: {} };
+  for (const [k, v] of Object.entries(r?.stores || {})) if (text(v)) out.stores[k] = v.slice(0, 40);
+  for (const [k, v] of Object.entries(r?.items || {})) {
+    if (v && text(v.name) && CATEGORIES.includes(v.category)) out.items[k] = { name: v.name.slice(0, 60), category: v.category };
+  }
+  return out;
+}
+
+// ---------- family sharing ----------
+// Everything this phone shares, in the shape sync.js merges.
+function sharedState() {
+  const deleted = (o) => Object.entries(o).map(([id, updated]) => ({ id, deleted: true, updated }));
+  return {
+    receipts: [...receipts.filter((r) => !r.sample).map((r) => ({ ...r, updated: r.updated || 0 })), ...deleted(gone.receipts)],
+    list: [...list.map((i) => ({ id: listKey(i.name), name: i.name, done: Boolean(i.done), updated: i.updated || 0 })), ...deleted(gone.list)],
+    budget: { value: budget, t: stamps.budget || 0 },
+    settings: { value: settings, t: stamps.settings || 0 },
+    rules: { value: rules, t: stamps.rules || 0 },
+  };
+}
+
+// Stores the merged result of this phone and the family's other phones.
+function applyShared(state) {
+  const asMap = (rows) => Object.fromEntries(rows.filter((x) => x.deleted).map((x) => [x.id, x.updated]));
+  applying = true;
+  try {
+    receipts = receipts.filter((r) => r.sample).concat(state.receipts.filter((r) => !r.deleted).map(cleanReceipt).filter(Boolean));
+    list = state.list.filter((i) => !i.deleted && typeof i.name === 'string' && i.name.trim())
+      .map((i) => ({ id: String(i.id), name: i.name.slice(0, 60), done: Boolean(i.done), updated: Number(i.updated) || 0 }));
+    gone = { receipts: asMap(state.receipts), list: asMap(state.list) };
+    budget = Math.max(0, Number(state.budget.value) || 0);
+    if (state.settings.value) settings = cleanSettings(state.settings.value);
+    if (state.rules.value) rules = cleanRules(state.rules.value);
+    stamps = { budget: state.budget.t || 0, settings: state.settings.t || 0, rules: state.rules.t || 0 };
+    save(); saveList(); saveGone(); write(BUDGET_KEY, budget); saveSettings(); write(RULES_KEY, rules); write(STAMPS_KEY, stamps);
+  } finally { applying = false; }
+  // Show the new data, without disturbing a receipt that is being checked.
+  if (currentView === 'add') renderSummary(); else show(currentView, false);
+}
+
+let syncTimer = 0, syncing = false, syncAgain = false;
+function syncSoon() {
+  if (!family || applying) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => syncNow(), 1500);
+}
+
+// One round with the family's online copy. Quiet unless asked: a phone with
+// no signal simply catches up later.
+async function syncNow({ mustExist = false, loud = false } = {}) {
+  if (!family || !FAMILY.projectId) return false;
+  if (syncing) { syncAgain = true; return false; }
+  syncing = true;
+  try {
+    const { id, key } = await familyFromCode(family.code);
+    await syncOnce({ store: firestoreStore(FAMILY, id), key, getLocal: sharedState, apply: applyShared, mustExist });
+    family = { ...family, last: Date.now(), error: '' };
+    return true;
+  } catch (err) {
+    family = { ...family, error: navigator.onLine ? err.message : 'No internet. It will catch up when you are back online.' };
+    if (loud) throw err;
+    return false;
+  } finally {
+    syncing = false;
+    if (family) write(FAMILY_KEY, family);
+    // Refresh the "last shared" line, unless a join is in progress (it redraws itself).
+    if (!loud && currentView === 'list' && !document.activeElement?.matches('input, select')) renderList();
+    if (syncAgain) { syncAgain = false; syncSoon(); }
+  }
+}
+
+async function joinFamily(code, name, starting) {
+  family = { code, name, last: 0, error: '' };
+  try {
+    // Receipts already on this phone were added by whoever is using it.
+    receipts = receipts.map((r) => (r.sample || r.by ? r : { ...r, by: name }));
+    await syncNow({ mustExist: !starting, loud: true });
+    save();
+    toast(starting ? 'Family started. Share the code with the others.' : 'Joined. This phone now shares with the family.');
+  } catch (err) {
+    family = null;
+    localStorage.removeItem(FAMILY_KEY);
+    throw err;
+  }
+}
+
+function familyCard() {
+  if (!FAMILY.projectId) return null;
+  const note = el('p', { class: 'hint warn', role: 'status' });
+  if (family) {
+    const when = !family.last ? 'not yet' : new Date(family.last).toLocaleTimeString('en', { hour: 'numeric', minute: '2-digit' });
+    note.textContent = family.error || '';
+    return el('div', { class: 'card' },
+      el('h2', {}, 'Family sharing'),
+      el('p', { class: 'muted' }, `On as ${family.name}. Last shared at ${when}. Receipts, the shopping list, budget and settings are the same on every phone that uses this code.`),
+      el('p', { class: 'big', id: 'family-code' }, family.code),
+      note,
+      el('button', { class: 'btn', onclick: async () => {
+        const text = `Join our Receipt Coach family. Open the app, go to Receipts, Family sharing, and enter this code: ${family.code}`;
+        try {
+          if (navigator.share) await navigator.share({ text });
+          else { await navigator.clipboard.writeText(family.code); toast('Code copied.'); }
+        } catch { /* the share sheet was closed */ }
+      } }, 'Send the code to someone'),
+      el('button', { class: 'btn', onclick: async () => { await syncNow(); renderList(); } }, 'Share now'),
+      el('button', { class: 'btn danger', onclick: () => {
+        if (!confirm('Stop sharing on this phone? What is on this phone stays, but it will no longer update.')) return;
+        family = null; localStorage.removeItem(FAMILY_KEY); renderList();
+      } }, 'Stop sharing on this phone'));
+  }
+  const name = el('input', { id: 'family-name', maxlength: 20, placeholder: 'e.g. Sam', autocomplete: 'given-name' });
+  const code = el('input', { id: 'family-join-code', placeholder: 'XXXX-XXXX-XXXX-XXXX', autocomplete: 'off', autocapitalize: 'characters' });
+  const go = (starting) => async () => {
+    const who = name.value.trim();
+    const tidy = starting ? makeCode() : tidyCode(code.value);
+    if (!who) { note.textContent = 'Enter your name first, so the family can see who added what.'; name.focus(); return; }
+    if (!tidy) { note.textContent = 'That code is not complete. It is 16 letters and numbers.'; code.focus(); return; }
+    note.className = 'hint'; note.textContent = 'Connecting…';
+    try { await joinFamily(tidy, who, starting); renderList(); } catch (err) { note.className = 'hint warn'; note.textContent = err.message; }
+  };
+  return el('div', { class: 'card' },
+    el('h2', {}, 'Family sharing'),
+    el('p', { class: 'muted' }, 'Share receipts, the shopping list, budget and settings with the rest of the household. The data is scrambled with a family code before it leaves this phone, so only people with the code can read it.'),
+    el('label', { for: 'family-name' }, 'Your name', name),
+    el('button', { class: 'btn primary', onclick: go(true) }, 'Start a family'),
+    el('label', { for: 'family-join-code' }, 'Or enter a code someone sent you', code),
+    el('button', { class: 'btn', onclick: go(false) }, 'Join with this code'),
+    note);
+}
+
 async function importData(e) {
   const file = e.target.files[0];
   if (!file) return;
@@ -576,15 +770,9 @@ async function importData(e) {
     // Older backups are a plain list of receipts.
     const incoming = Array.isArray(data) ? data : data && data.receipts;
     if (!Array.isArray(incoming)) throw new Error('not a backup');
-    const good = incoming.filter((r) => r && typeof r.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(r.date) && Array.isArray(r.items) && typeof r.total === 'number')
-      .map((r) => ({
-        ...(r.sample ? { sample: true } : {}),
-        id: String(r.id || newId()),
-        store: String(r.store || ''), date: r.date, eatingOut: Boolean(r.eatingOut), total: r.total,
-        items: r.items.filter((i) => i && typeof i.price === 'number').map((i) => ({ name: String(i.name || ''), price: i.price, category: CATEGORIES.includes(i.category) ? i.category : 'Other' })),
-      }));
+    const good = incoming.map(cleanReceipt).filter(Boolean);
     const have = new Set(receipts.map((r) => r.id));
-    const fresh = good.filter((r) => !have.has(r.id));
+    const fresh = good.filter((r) => !have.has(r.id) && !gone.receipts[r.id]).map((r) => ({ ...r, updated: r.updated || Date.now() }));
     receipts = receipts.concat(fresh);
     save();
     if (!budget && Number(data.budget) > 0) { budget = Number(data.budget); write(BUDGET_KEY, budget); }
@@ -611,7 +799,7 @@ async function importData(e) {
       for (const i of data.list) {
         if (!i || typeof i.name !== 'string' || !i.name.trim() || names.has(itemKey(i.name))) continue;
         names.add(itemKey(i.name));
-        list.push({ id: newId(), name: i.name.trim().slice(0, 60), done: Boolean(i.done) });
+        list.push({ id: newId(), name: i.name.trim().slice(0, 60), done: Boolean(i.done), updated: Date.now() });
       }
       saveList();
     }
@@ -623,6 +811,15 @@ async function importData(e) {
 }
 
 renderSummary();
+
+// Family sharing: catch up when the app opens, comes back to the front or gets
+// its signal back, and check every 20 seconds while it is on screen.
+if (family && FAMILY.projectId) {
+  syncNow();
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) syncNow(); });
+window.addEventListener('online', () => syncNow());
+setInterval(() => { if (!document.hidden) syncNow(); }, 20000);
 
 // Keep the app and the reader on the phone, so both work with no signal.
 if ('serviceWorker' in navigator) {
